@@ -1,0 +1,299 @@
+---
+title: "Bartik"
+author: "Ivy Yang"
+date: "2024-06-03"
+output: html_document
+---
+###### Construct the Bartik-like instrument for wealth ######
+
+```{r}
+data <- read_csv(file ="/Users/ivyyang/Dropbox/cloud/Research/Research 2023/Chapter 1/Data/data_CCA_macro_micro_SHI.csv",show_col_types = FALSE)
+```
+```{r}
+# Use this, including CCA and state_house_ind
+load(file = "/Users/ivyyang/Dropbox/cloud/Research/Research 2023/Chapter 1/Data/data_CCA_macro_micro_SHI.rds")
+```
+
+
+```{r}
+names(data)
+```
+
+```{r}
+# deflate the stock market index
+# Set the benchmark year's CPI for 2019
+benchmark_cpi <- data %>%
+  filter(year == 2019) %>%
+  summarise(mean_CPIAUCSL = mean(CPIAUCSL, na.rm = TRUE)) %>%
+  pull(mean_CPIAUCSL)
+
+data <- data %>%
+  mutate(
+    ETF = ifelse(
+      year < 2019,
+      BOGZ1FA564091403A * (benchmark_cpi / CPIAUCSL),  # Inflate past years
+      ifelse(
+        year > 2019,
+        BOGZ1FA564091403A / (CPIAUCSL / benchmark_cpi),  # Deflate future years
+        BOGZ1FA564091403A  # No change for the benchmark year
+      )
+    )
+  )
+```
+
+
+
+```{r}
+Pdd09<-pdata.frame(subset(data,year<2009),index = c("pid","year"))
+Pdd21<-pdata.frame(subset(data,year!=2009),index = c("pid","year"))
+Pdd19 <- pdata.frame(subset(data, !(year == 2009 | year == 2021)), index = c("pid", "year"))
+
+# Define which time period I want examine at
+Pdd<-Pdd21
+```
+
+```{r}
+# Create fifth-order polynomial in wealth
+Pdd$wealth_fm<-Pdd$wealth/100000
+Pdd$wealth_sq <- Pdd$wealth^2/100000
+Pdd$wealth_cu <- Pdd$wealth^3/100000
+Pdd$wealth_4 <- Pdd$wealth^4/100000
+Pdd$wealth_5 <- Pdd$wealth^5/100000
+
+```
+
+
+```{r}
+library(dplyr)
+library(ivreg)
+library(AER)
+
+colnames(Pdd) <- make.unique(colnames(Pdd))
+
+
+# Calculate the Bartik-like instrument for wealth
+Pdd <- Pdd %>%
+    group_by(pid,year) %>%
+    mutate(
+        omega_stock = stock_value / wealth,
+        omega_house = house_value / wealth
+    ) %>%
+    ungroup()  # Remove grouping
+
+# generate the lagged omega_stock and omega_house
+Pdd <- Pdd %>%
+    group_by(pid) %>%
+    mutate(
+        lag_omega_stock = dplyr::lag(omega_stock),
+        lag_omega_house = dplyr::lag(omega_house)
+    ) %>%
+    ungroup()  # Remove grouping
+```
+
+#### Regressions for the shocks on components ###
+
+```{r}
+library(zoo)
+
+Pdd <- Pdd %>%
+  group_by(pid) %>%
+  mutate(state_house_ind = na.locf(state_house_ind, na.rm = FALSE)) %>%
+  ungroup()
+
+```
+
+
+```{r}
+# generate the Delta_SP500 and Delta_house 
+
+Pdd <- Pdd %>%
+  arrange(pid, year) %>%
+  group_by(pid) %>%
+  mutate(
+    Delta_SP = L.ExpMarket - dplyr::lag(L.ExpMarket),  # Calculate for stock price
+    Delta_house = state_house_ind - dplyr::lag(state_house_ind)  # Calculate for house price
+  ) %>%
+  ungroup()
+
+
+Pdd <- Pdd %>%
+  group_by(pid) %>%
+  mutate(
+    G_SP = ifelse(is.na(dplyr::lag(L.ExpMarket)), NA, (Delta_SP / dplyr::lag(L.ExpMarket)) - L.Tbill),
+    G_house = ifelse(is.na(dplyr::lag(state_house_ind)), NA, (Delta_house / dplyr::lag(state_house_ind)) - L.Tbill)
+  ) %>%
+  ungroup()
+
+```
+
+```{r}
+summary(Pdd$Delta_house)
+```
+
+
+```{r}
+# regress G_SP-L.Tbill and G_house-L.Tbill on CCA1 and CCA2 separately
+reg1<-lm(G_SP~CCA1+CCA2,data=Pdd)
+reg2<-lm(G_house~CCA1+CCA2,data=Pdd)
+```
+
+```{r}
+# Get the mean and SD of the predicted G_SP and G_house
+Pdd<-Pdd%>%
+  group_by(pid)%>%
+  mutate(
+    G_SP_hat=reg1$coefficients[1]+reg1$coefficients[2]*CCA1+reg1$coefficients[3]*CCA2,
+    G_house_hat=reg2$coefficients[1]+reg2$coefficients[2]*CCA1+reg2$coefficients[3]*CCA2
+  )%>%
+  ungroup()  # Remove grouping
+
+G_SP_mean<-mean(Pdd$G_SP_hat)
+G_SP_sd<-sd(Pdd$G_SP_hat)
+G_house_mean<-mean(Pdd$G_house_hat)
+G_house_sd<-sd(Pdd$G_house_hat)
+
+
+```
+
+```{r}
+# calculate the shif f(G_SP) and f(G_house) for the bartik IV which is the (G_SP-G_SP_mean)/G_SP_sd and (G_house-G_house_mean)/G_house_sd
+
+Pdd<-Pdd%>%
+  group_by(pid)%>%
+  mutate(
+    f_G_SP=(G_SP-G_SP_mean)/G_SP_sd,
+    f_G_house=(G_house-G_house_mean)/G_house_sd
+  )%>%
+  ungroup()  # Remove grouping
+```
+
+
+
+```{r}
+# generate IV for each household pid, each time year: bartik_IV = lag_omega_IRA * Delta_ETF + lag_omega_house * Delta_house
+Pdd <- Pdd %>%
+    group_by(pid, year) %>%
+    mutate(
+        bartik_IV = lag_omega_stock * f_G_SP + lag_omega_house * f_G_house
+    ) %>%
+    ungroup()  # Remove grouping
+```
+
+```{r}
+# Create dummy variables
+Pdd <- Pdd %>%
+  mutate(pid_factor = as.factor(pid),
+         year_factor = as.factor(year))
+
+pid_dummies <- model.matrix(~ pid_factor - 1, data = Pdd)
+year_dummies <- model.matrix(~ year_factor - 1, data = Pdd)
+
+# Combine dummy variables with the original data
+Pdd <- cbind(Pdd, pid_dummies, year_dummies)
+```
+
+```{r}
+save(Pdd,file = "/Users/ivyyang/Dropbox/cloud/Research/Research 2023/Chapter 1/Data/Pdd_bartik ready.rds")
+```
+
+
+```{r}
+
+# First stage regression
+Pdd$bartik_IV[is.infinite(Pdd$bartik_IV)] <- NA
+
+first_stage_bartik <- ivreg(wealth_fm ~ bartik_IV, data = na.omit(Pdd))
+first_stage_HI <- ivreg(wealth_fm ~ Delta_house, data = na.omit(Pdd))
+
+# Predict the fitted values of wealth from the first stage
+Pdd$predicted_wealth_bartik <- predict(first_stage_bartik, newdata = Pdd)
+# Predict the fitted values of wealth from the first stage
+Pdd$predicted_wealth_HI <- predict(first_stage_HI, newdata = Pdd)
+
+# Use the predicted values in the second-stage probit model
+probit_IV_bartik_own <- glm(D_OwnBus ~ age + D_college + D_married + race + work_hour_typical_pw + predicted_wealth_bartik + pid_factor + year_factor, 
+                            data = Pdd, 
+                            family = binomial(link = "probit"))
+probit_IV_bartik_enter <- glm(Enter1_bus ~ age + D_college + D_married + race + work_hour_typical_pw + predicted_wealth_bartik + pid_factor + year_factor, 
+                            data = Pdd, 
+                            family = binomial(link = "probit"))
+
+# Use the predicted values in the second-stage probit model
+probit_IV_bartik_own <- glm(D_OwnBus ~ age + D_college + D_married + race + work_hour_typical_pw + predicted_wealth_bartik + pid_factor + year_factor, 
+                            data = Pdd, 
+                            family = binomial(link = "probit"))
+probit_IV_bartik_enter <- glm(Enter1_bus ~ age + D_college + D_married + race + work_hour_typical_pw + predicted_wealth_bartik + pid_factor + year_factor, 
+                            data = Pdd, 
+                            family = binomial(link = "probit"))
+```
+
+```{r}
+
+# Extract coefficients
+coefficients <- coef(probit_IV_bartik_own)
+
+# Calculate the mean values of the covariates
+mean_values <- colMeans(model.matrix(probit_IV_bartik_own))
+
+# Calculate the linear predictor at the mean of covariates
+linear_predictor <- sum(mean_values * coefficients)
+
+# Calculate the predicted probability at the mean of covariates
+pred_prob <- pnorm(linear_predictor)
+
+# Extract the coefficient for predicted_wealth_bartik
+wealth_coef <- coefficients["predicted_wealth_bartik"]
+
+# Calculate the density of the normal distribution at the predicted probability
+density_at_pred_prob <- dnorm(linear_predictor)
+
+# Calculate the marginal effect of wealth
+marginal_effect_wealth <- density_at_pred_prob * wealth_coef
+
+# Display the marginal effect of wealth
+marginal_effect_wealth
+```
+
+```{r}
+# First stage regression
+first_stage <- ivreg(wealth_fm ~ bartik_IV, data = Pdd)
+
+# Predict the fitted values of wealth from the first stage
+Pdd$predicted_wealth_bartik <- predict(first_stage, newdata = Pdd)
+
+# Use the predicted values in the second-stage probit model
+probit_IV_bartik_enter <- glm(Enter1_bus ~ age + D_college + D_married + race + work_hour_typical_pw + predicted_wealth_bartik + pid_factor + year_factor, 
+                            data = Pdd, 
+                            family = binomial(link = "probit"))
+
+# Summary of the probit model
+summary(probit_IV_bartik_enter)
+
+```
+```{r}
+# Extract coefficients
+coefficients <- coef(probit_IV_bartik_enter)
+
+# Calculate the mean values of the covariates
+mean_values <- colMeans(model.matrix(probit_IV_bartik_enter))
+
+# Calculate the linear predictor at the mean of covariates
+linear_predictor <- sum(mean_values * coefficients)
+
+# Calculate the predicted probability at the mean of covariates
+pred_prob <- pnorm(linear_predictor)
+
+# Extract the coefficient for predicted_wealth_bartik
+wealth_coef <- coefficients["predicted_wealth_bartik"]
+
+# Calculate the density of the normal distribution at the predicted probability
+density_at_pred_prob <- dnorm(linear_predictor)
+
+# Calculate the marginal effect of wealth
+marginal_effect_wealth <- density_at_pred_prob * wealth_coef
+
+# Display the marginal effect of wealth
+marginal_effect_wealth
+```
+
+

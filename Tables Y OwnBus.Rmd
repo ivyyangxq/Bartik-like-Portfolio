@@ -1,0 +1,1202 @@
+---
+title: "SSIV_who constrained"
+author: "Ivy Yang"
+date: "2024-08-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(quantreg)
+```
+
+
+# Load packages
+```{r}
+library(readr)
+require(psidR)
+require(plm)
+require(ivtools)
+require(stargazer)
+require(foreign)
+require(dplyr)
+library(ggthemes)  # For pretty_breaks
+library(pglm)
+library(ivreg)
+library(AER)
+library(pROC)
+require(tidyr)
+library(ggplot2)
+library(scales)
+library(mfx)
+library(quantreg)
+```
+
+# Load data: this data comes from CCA generator for Bartik IV-Merge Macro Micro CCA Bartik-state house ind
+```{r}
+# Load data from MAC ####
+load(file ="/Users/ivyyang/Dropbox/cloud/Research/Research 2023/Chapter 1/Data/data_CCA_macro_micro_SHI.rds")
+```
+
+```{r}
+# this is data for bartik
+#### Construct the Bartik-like IV - get to the definition of Y directly ####
+load(file = "/Users/ivyyang/Dropbox/cloud/Research/Research 2023/Chapter 1/Data/Pdd_bartik ready.rds")
+```
+
+
+
+```{r}
+# Load data from DELL ####
+load(file = "C:/Users/ivyyang/Dropbox/cloud/Research/Research 2023/Chapter 1/Data/data_CCA_macro_micro_SHI.rds")
+```
+
+
+```{r}
+# summary wealth by year
+d_mean <- data %>%
+  group_by(year) %>%
+  summarise(wealth = mean(wealth, na.rm = TRUE),
+  house_value = mean(house_value, na.rm = TRUE),
+  check_save = mean(check_save, na.rm = TRUE),
+  stock_value = mean(stock_value, na.rm = TRUE),
+  bond_value = mean(bond_value, na.rm = TRUE),
+  IRA_value = mean(IRA_value, na.rm = TRUE),
+  total_debt = mean(total_debt, na.rm = TRUE),
+  remain_mort1 = mean(remain_mort1, na.rm = TRUE),
+  remain_mort2 = mean(remain_mort2, na.rm = TRUE))
+
+# Print the resulting dataframe
+print(d_mean)
+```
+
+```{r}
+# convert into panel data frame
+Pdd09<-pdata.frame(subset(data,year<2009),index = c("pid","year"))
+Pdd21<-pdata.frame(data,index = c("pid","year"))
+Pdd19 <- pdata.frame(subset(data, !(year == 2021)), index = c("pid", "year"))
+```
+
+```{r}
+# Define the period I want to examine
+Pdd<-Pdd21
+```
+
+# Pretreat my data - generate non-linear polymials
+```{r}
+# Create orthogonal polynomials for wealth
+wealth_poly <- poly(Pdd$wealth / 100000, 5)
+
+# Add orthogonal polynomial terms to the data frame
+Pdd$wealth_poly_1 <- wealth_poly[, 1]
+Pdd$wealth_poly_2 <- wealth_poly[, 2]
+Pdd$wealth_poly_3 <- wealth_poly[, 3]
+Pdd$wealth_poly_4 <- wealth_poly[, 4]
+Pdd$wealth_poly_5 <- wealth_poly[, 5]
+
+```
+
+```{r}
+# Create dummy variables for individual (pid) and time (year) fixed effects
+Pdd <- Pdd %>%
+  mutate(pid_factor = as.factor(pid),
+         year_factor = as.factor(year))
+
+# Use model.matrix to create dummy variables
+pid_dummies <- model.matrix(~ pid_factor - 1, data = Pdd)
+year_dummies <- model.matrix(~ year_factor - 1, data = Pdd)
+
+# Combine dummy variables with the original data
+Pdd <- cbind(Pdd, pid_dummies, year_dummies)
+```
+
+```{r}
+# rescale wealth
+Pdd$wealth_fm<-Pdd$wealth/100000
+```
+
+
+```{r}
+# select the dependent variable 
+Pdd$Y <- Pdd$D_OwnBus
+
+```
+
+################################################################################
+################################## Regression ##################################
+################################################################################
+
+# Table 2: Vanilla Logit and Probit with Two way fixed effects
+```{r}
+# Logit model with linear wealth and fixed effects
+logit_glm_linear_fe <- glm(Y ~ age + D_college + D_married + D_black  + D_gender + D_bus_fam_experience + work_hour_typical_pw + wealth_fm + 
+                            pid_factor + year_factor, 
+                            data = Pdd, 
+                            family = binomial(link = "logit"))
+# Probit model with linear wealth and fixed effects
+probit_glm_linear_fe <- glm(Y ~ age + D_college + D_married + D_black  + D_gender + D_bus_fam_experience + work_hour_typical_pw + wealth_fm + 
+                            pid_factor + year_factor, 
+                            data = Pdd, 
+                            family = binomial(link = "probit"))
+```
+
+```{r}
+# show results - check for statistically significance
+stargazer(logit_glm_linear_fe, probit_glm_linear_fe, type = "text", single.row = TRUE, digits = 2, omit = "pid_factor", title = "Table 2: Vanilla Logit and Probit with Two way fixed effects")
+```
+
+
+```{r}
+# show results without the coefficients of fixed effects with all results (coefficients and SD) scaled up multiplied by 100
+
+# Extract coefficients and standard errors
+logit_coefficients <- coef(logit_glm_linear_fe) * 100
+probit_coefficients <- coef(probit_glm_linear_fe) * 100
+
+logit_se <- summary(logit_glm_linear_fe)$coefficients[, "Std. Error"] * 100
+probit_se <- summary(probit_glm_linear_fe)$coefficients[, "Std. Error"] * 100
+
+# Display the models using stargazer
+stargazer(logit_glm_linear_fe, probit_glm_linear_fe,
+          type = "text",
+          coef = list(logit_coefficients, probit_coefficients),
+          se = list(logit_se, probit_se),
+          single.row = TRUE,
+          digits = 2,
+          omit = "pid_factor",
+          title = "Table 2: Vanilla Logit and Probit with Two Way Fixed Effects")
+
+```
+
+```{r}
+# Manual logit marginal effects
+# Extract coefficients
+coefficients <- coef(logit_glm_linear_fe)
+
+# Calculate the mean values of the covariates (excluding the fixed effect dummies)
+mean_values <- colMeans(model.matrix(logit_glm_linear_fe)[, names(coefficients)])
+
+# Calculate the linear predictor at the mean of covariates
+linear_predictor <- sum(mean_values * coefficients)
+pred_prob <- plogis(linear_predictor)
+
+# Extract the coefficient for wealth_fm
+wealth_coef <- coefficients["wealth_fm"]
+
+# Calculate the density of the logistic distribution at the predicted probability
+density_at_pred_prob <- dlogis(linear_predictor)
+
+# Calculate the marginal effect of wealth
+marginal_effect_wealth_logit <- density_at_pred_prob * wealth_coef
+
+# Display the marginal effect of wealth
+print("~~~~~~~~~~ Table 2: AME of logit (OwnBus) ~~~~~~~~~~~~~~")
+print(marginal_effect_wealth_logit)*100
+
+```
+
+```{r}
+# Extract coefficients
+coefficients <- coef(probit_glm_linear_fe)
+
+# Calculate the mean values of the covariates (excluding the fixed effect dummies)
+mean_values <- colMeans(model.matrix(probit_glm_linear_fe)[, names(coefficients)])
+
+# Calculate the linear predictor at the mean of covariates
+linear_predictor <- sum(mean_values * coefficients)
+pred_prob <- pnorm(linear_predictor)
+
+# Extract the coefficient for wealth_fm
+wealth_coef <- coefficients["wealth_fm"]
+
+# Calculate the density of the normal distribution at the predicted probability
+density_at_pred_prob <- dnorm(linear_predictor)
+
+# Calculate the marginal effect of wealth
+marginal_effect_wealth_probit <- density_at_pred_prob * wealth_coef
+
+# Display the marginal effect of wealth scaled up by 100
+print("~~~~~~~~~~ Table 2: AME of Probit (OwnBus) ~~~~~~~~~~~~~~")
+print(marginal_effect_wealth_probit)*100
+
+```
+
+
+# Table 3: Probit Estimation for Non-linear Polynomials
+```{r}
+# Probit model with orthogonal polynomials of wealth and fixed effects
+
+probit_glm_poly_fe <- glm(Y ~ age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw + wealth_poly_1 + wealth_poly_2 + wealth_poly_3 + wealth_poly_4 + wealth_poly_5 + 
+                      pid_factor + year_factor, 
+                     data = Pdd, 
+                     family = binomial(link = "probit"))
+```
+
+
+```{r}
+# Extract coefficients and standard errors
+probit_poly_coefficients <- coef(probit_glm_poly_fe) * 100
+probit_poly_se <- summary(probit_glm_poly_fe)$coefficients[, "Std. Error"] * 100
+
+# Display the model using stargazer
+stargazer(probit_glm_poly_fe,
+          type = "text",
+          coef = list(probit_poly_coefficients),
+          se = list(probit_poly_se),
+          single.row = TRUE,
+          digits = 2,
+          omit = "pid_factor",
+          title = "Probit Estimation for Non-linear Polynomials")
+
+```
+
+
+```{r}
+
+# Manual probit marginal effects
+
+# Extract coefficients from the probit model
+coefficients <- coef(probit_glm_poly_fe)
+
+# Calculate the mean values of the covariates (excluding the fixed effect dummies)
+mean_values <- colMeans(model.matrix(probit_glm_poly_fe)[, names(coefficients)])
+
+# Calculate the linear predictor at the mean of covariates
+linear_predictor <- sum(mean_values * coefficients)
+pred_prob <- pnorm(linear_predictor)
+
+# Extract the coefficients for the orthogonal polynomials of wealth
+wealth_poly_1_coef <- coefficients["wealth_poly_1"]
+wealth_poly_2_coef <- coefficients["wealth_poly_2"]
+wealth_poly_3_coef <- coefficients["wealth_poly_3"]
+wealth_poly_4_coef <- coefficients["wealth_poly_4"]
+wealth_poly_5_coef <- coefficients["wealth_poly_5"]
+
+# Calculate the density of the normal distribution at the predicted probability
+density_at_pred_prob <- dnorm(linear_predictor)
+
+# Calculate the marginal effect of each polynomial term
+marginal_effect_wealth_poly_1 <- density_at_pred_prob * wealth_poly_1_coef
+marginal_effect_wealth_poly_2 <- density_at_pred_prob * wealth_poly_2_coef
+marginal_effect_wealth_poly_3 <- density_at_pred_prob * wealth_poly_3_coef
+marginal_effect_wealth_poly_4 <- density_at_pred_prob * wealth_poly_4_coef
+marginal_effect_wealth_poly_5 <- density_at_pred_prob * wealth_poly_5_coef
+
+# Display the marginal effects of polynomial terms
+print("~~~~~~~~~~ Marginal Effects of Polynomial Terms ~~~~~~~~~~~~~~")
+print(marginal_effect_wealth_poly_1)
+print(marginal_effect_wealth_poly_2)
+print(marginal_effect_wealth_poly_3)
+print(marginal_effect_wealth_poly_4)
+print(marginal_effect_wealth_poly_5)
+
+# Calculate the overall marginal effect of the original wealth variable
+# by summing the effects of polynomial terms multiplied by their respective polynomial basis functions
+
+mean_wealth <- mean(Pdd$wealth / 100000)  # Assuming wealth is scaled by 100000
+wealth_basis_functions <- attr(wealth_poly, "coefs")
+
+marginal_effect_wealth <- density_at_pred_prob * (
+  wealth_poly_1_coef * (mean_wealth ^ 0) +
+  wealth_poly_2_coef * (mean_wealth ^ 1) +
+  wealth_poly_3_coef * (mean_wealth ^ 2) +
+  wealth_poly_4_coef * (mean_wealth ^ 3) +
+  wealth_poly_5_coef * (mean_wealth ^ 4)
+)
+
+# Display the overall marginal effect of wealth
+print("~~~~~~~~~~ Overall Marginal Effect of Wealth ~~~~~~~~~~~~~~")
+print(marginal_effect_wealth)
+
+```
+
+
+# Table 5: Probit Regression on sub groups of the Initial Wealth Distribution (1999) 
+
+```{r}
+
+# Step 1: Subset the data for the year 1999 and calculate quantiles
+initial_year_data <- Pdd %>% filter(year == 1999)
+
+# Calculate the wealth quantiles
+initial_quantiles <- quantile(initial_year_data$wealth, probs = seq(0, 1, by = 0.2), na.rm = TRUE)
+
+# Assign quantile labels to each household based on their 1999 wealth
+initial_year_data <- initial_year_data %>%
+  mutate(initial_wealth_quantile = cut(wealth,
+                                       breaks = initial_quantiles,
+                                       labels = c("Q1", "Q2", "Q3", "Q4", "Q5"),
+                                       include.lowest = TRUE))
+
+# Step 2: Merge the quantile labels back into the main dataset
+# Select only the `pid` and `initial_wealth_quantile` columns to merge
+Pdd <- Pdd %>%
+  left_join(initial_year_data %>% dplyr::select(pid, initial_wealth_quantile), by = "pid")
+
+# Step 3: Verify if the column has been added
+glimpse(Pdd)
+
+```
+
+
+```{r}
+
+# Subset data for each quantile group
+Pdd_Q1 <- subset(Pdd, initial_wealth_quantile == "Q1")
+Pdd_Q2 <- subset(Pdd, initial_wealth_quantile == "Q2")
+Pdd_Q3 <- subset(Pdd, initial_wealth_quantile == "Q3")
+Pdd_Q4 <- subset(Pdd, initial_wealth_quantile == "Q4")
+Pdd_Q5 <- subset(Pdd, initial_wealth_quantile == "Q5")
+
+```
+
+```{r}
+# Fit probit models for each quantile group
+probit_Q1 <- glm(Y ~ age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw + wealth_fm + 
+                 pid_factor + year_factor, 
+                 data = Pdd_Q1, 
+                 family = binomial(link = "probit"))
+
+probit_Q2 <- glm(Y ~ age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw + wealth_fm + 
+                 pid_factor + year_factor, 
+                 data = Pdd_Q2, 
+                 family = binomial(link = "probit"))
+
+probit_Q3 <- glm(Y ~ age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw + wealth_fm + 
+                 pid_factor + year_factor, 
+                 data = Pdd_Q3, 
+                 family = binomial(link = "probit"))
+
+probit_Q4 <- glm(Y ~ age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw + wealth_fm + 
+                 pid_factor + year_factor, 
+                 data = Pdd_Q4, 
+                 family = binomial(link = "probit"))
+
+probit_Q5 <- glm(Y ~ age + D_college + D_married + D_black+ D_gender + D_bus_fam_experience + work_hour_typical_pw + wealth_fm + 
+                 pid_factor + year_factor, 
+                 data = Pdd_Q5, 
+                 family = binomial(link = "probit"))
+
+```
+
+```{r}
+# Extract coefficients and standard errors, and scale them by 100
+coefficients_Q1 <- coef(probit_Q1) * 100
+coefficients_Q2 <- coef(probit_Q2) * 100
+coefficients_Q3 <- coef(probit_Q3) * 100
+coefficients_Q4 <- coef(probit_Q4) * 100
+coefficients_Q5 <- coef(probit_Q5) * 100
+
+se_Q1 <- summary(probit_Q1)$coefficients[, "Std. Error"] * 100
+se_Q2 <- summary(probit_Q2)$coefficients[, "Std. Error"] * 100
+se_Q3 <- summary(probit_Q3)$coefficients[, "Std. Error"] * 100
+se_Q4 <- summary(probit_Q4)$coefficients[, "Std. Error"] * 100
+se_Q5 <- summary(probit_Q5)$coefficients[, "Std. Error"] * 100
+
+# Display the results using stargazer
+stargazer(probit_Q1, probit_Q2, probit_Q3, probit_Q4, probit_Q5,
+          type = "text",
+          coef = list(coefficients_Q1, coefficients_Q2, coefficients_Q3, coefficients_Q4, coefficients_Q5),
+          se = list(se_Q1, se_Q2, se_Q3, se_Q4, se_Q5),
+          single.row = TRUE,
+          digits = 2,
+          omit = "pid_factor",
+          title = "Probit Estimations for Wealth Quantiles")
+```
+
+
+
+```{r}
+# Function to compute marginal effects for a probit model (focused on wealth_fm)
+compute_marginal_effect <- function(model) {
+  # Extract coefficients
+  coefficients <- coef(model)
+  
+  # Calculate the mean value of wealth_fm
+  mean_wealth <- mean(model.matrix(model)[, "wealth_fm"], na.rm = TRUE)
+  
+  # Calculate the linear predictor at the mean value of wealth_fm
+  linear_predictor <- coefficients["(Intercept)"] + coefficients["wealth_fm"] * mean_wealth
+  pred_prob <- pnorm(linear_predictor)
+  
+  # Extract the coefficient for wealth_fm
+  wealth_fm_coef <- coefficients["wealth_fm"]
+  
+  # Calculate the density of the normal distribution at the predicted probability
+  density_at_pred_prob <- dnorm(linear_predictor)
+  
+  # Calculate the marginal effect of wealth_fm
+  marginal_effect_wealth_fm <- density_at_pred_prob * wealth_fm_coef
+  return(marginal_effect_wealth_fm)
+}
+
+# Compute marginal effects for each quantile group
+marginal_effect_Q1 <- compute_marginal_effect(probit_Q1)
+marginal_effect_Q2 <- compute_marginal_effect(probit_Q2)
+marginal_effect_Q3 <- compute_marginal_effect(probit_Q3)
+marginal_effect_Q4 <- compute_marginal_effect(probit_Q4)
+marginal_effect_Q5 <- compute_marginal_effect(probit_Q5)
+
+# Display the marginal effects in scientific notation
+print("Marginal Effects of wealth_fm (in scientific notation):")
+print(paste("Q1:", format(marginal_effect_Q1, scientific = TRUE)))
+print(paste("Q2:", format(marginal_effect_Q2, scientific = TRUE)))
+print(paste("Q3:", format(marginal_effect_Q3, scientific = TRUE)))
+print(paste("Q4:", format(marginal_effect_Q4, scientific = TRUE)))
+print(paste("Q5:", format(marginal_effect_Q5, scientific = TRUE)))
+
+```
+################################################################################
+
+################                IV regressions                 ################
+
+################################################################################
+
+# Table 6: IV Regression with Instruments for Wealth (Inheritance and Lump-sum Transfer)
+```{r}
+# First stage regressions for two instruments
+
+first_stage_inheritance <- ivreg(wealth_fm ~ inherit + age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw  , data = Pdd)
+
+first_stage_lumpsum <- ivreg(wealth_fm ~ lumpsum_endowment +  age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw, data = Pdd)
+
+## Predict the fitted values of wealth from the first stage
+Pdd$predicted_wealth_inheritance <- predict(first_stage_inheritance, newdata = Pdd)
+Pdd$predicted_wealth_lumpsum <- predict(first_stage_lumpsum, newdata = Pdd)
+
+```
+
+```{r}
+
+# Second stage regression with predicted wealth from the first stage as an instrument
+
+probit_IV_inherit <- glm(Y ~ age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw +  predicted_wealth_inheritance + pid_factor + year_factor, 
+                       data = Pdd, 
+                       family = binomial(link = "probit"))
+
+probit_IV_lumpsum <- glm(Y ~ age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw +  predicted_wealth_lumpsum + pid_factor + year_factor, 
+                       data = Pdd, 
+                       family = binomial(link = "probit"))
+```
+
+```{r}
+# Extract coefficients and standard errors, and scale them by 100
+
+coefficients_IV_inherit <- coef(probit_IV_inherit) * 100
+coefficients_IV_lumpsum <- coef(probit_IV_lumpsum) * 100
+
+se_IV_inherit <- summary(probit_IV_inherit)$coefficients[, "Std. Error"] * 100
+se_IV_lumpsum <- summary(probit_IV_lumpsum)$coefficients[, "Std. Error"] * 100
+
+# Display the results using stargazer
+stargazer(probit_IV_inherit, probit_IV_lumpsum,
+          type = "text",
+          coef = list(coefficients_IV_inherit, coefficients_IV_lumpsum),
+          se = list(se_IV_inherit, se_IV_lumpsum),
+          single.row = TRUE,
+          digits = 2,
+          omit = "pid_factor",
+          title = "IV Regression with Instruments for Wealth (Inheritance and Lump-sum Transfer)")
+```
+
+```{r}
+# Manual probit marginal effects
+
+# Function to compute marginal effects for a probit model
+compute_marginal_effect_probit <- function(model, term) {
+  # Extract coefficients
+  coefficients <- coef(model)
+  
+  # Calculate the mean values of the covariates (excluding the fixed effect dummies)
+  mean_values <- colMeans(model.matrix(model)[, names(coefficients)])
+  
+  # Calculate the linear predictor at the mean of covariates
+  linear_predictor <- sum(mean_values * coefficients)
+  pred_prob <- pnorm(linear_predictor)
+  
+  # Extract the coefficient for the term of interest
+  term_coef <- coefficients[term]
+  
+  # Calculate the density of the normal distribution at the predicted probability
+  density_at_pred_prob <- dnorm(linear_predictor)
+  
+  # Calculate the marginal effect of the term
+  marginal_effect <- density_at_pred_prob * term_coef
+  return(marginal_effect)
+}
+
+```
+
+```{r}
+# Function to compute the marginal effect of wealth_fm via instrumental variables
+compute_marginal_effect_IV <- function(first_stage_model, second_stage_model, instrument) {
+  # First stage marginal effect
+  first_stage_coef <- coef(first_stage_model)["inherit"]  # or ["lumpsum_endowment"]
+  
+  # Second stage marginal effect
+  second_stage_marginal_effect <- compute_marginal_effect_probit(second_stage_model, paste0("predicted_", instrument))
+  
+  # Overall marginal effect
+  overall_marginal_effect <- first_stage_coef * second_stage_marginal_effect
+  return(overall_marginal_effect)
+}
+
+# Compute marginal effects for the IV probit models
+marginal_effect_IV_inherit <- compute_marginal_effect_IV(first_stage_inheritance, probit_IV_inherit, "wealth_inheritance")
+marginal_effect_IV_lumpsum <- compute_marginal_effect_IV(first_stage_lumpsum, probit_IV_lumpsum, "wealth_lumpsum")
+
+# Display the marginal effects in scientific notation
+print("Marginal Effects (in scientific notation):")
+print(paste("IV_inherit:", format(marginal_effect_IV_inherit, scientific = TRUE)))
+print(paste("IV_lumpsum:", format(marginal_effect_IV_lumpsum, scientific = TRUE)))
+
+```
+
+```{r}
+# Only show the second stages' marginal effects, predicted_wealth_inheritance and predicted_wealth_lumpsum on the dependent variable Y
+# Extract coefficients
+coefficients_IV_inherit <- coef(probit_IV_inherit)
+coefficients_IV_lumpsum <- coef(probit_IV_lumpsum)
+
+# Calculate the mean values of the covariates (excluding the fixed effect dummies)
+mean_values_inherit <- colMeans(model.matrix(probit_IV_inherit)[, names(coefficients_IV_inherit)])
+mean_values_lumpsum <- colMeans(model.matrix(probit_IV_lumpsum)[, names(coefficients_IV_lumpsum)])
+
+# Calculate the linear predictor at the mean of covariates
+linear_predictor_inherit <- sum(mean_values_inherit * coefficients_IV_inherit)
+linear_predictor_lumpsum <- sum(mean_values_lumpsum * coefficients_IV_lumpsum)
+
+# Extract the coefficients for the predicted wealth terms
+predicted_wealth_inherit_coef <- coefficients_IV_inherit["predicted_wealth_inheritance"]
+predicted_wealth_lumpsum_coef <- coefficients_IV_lumpsum["predicted_wealth_lumpsum"]
+
+# Calculate the density of the normal distribution at the predicted probability
+density_at_pred_prob_inherit <- dnorm(linear_predictor_inherit)
+density_at_pred_prob_lumpsum <- dnorm(linear_predictor_lumpsum)
+
+# Calculate the marginal effect of the predicted wealth terms
+marginal_effect_predicted_wealth_inherit <- density_at_pred_prob_inherit * predicted_wealth_inherit_coef
+marginal_effect_predicted_wealth_lumpsum <- density_at_pred_prob_lumpsum * predicted_wealth_lumpsum_coef
+
+# Display the marginal effects of the predicted wealth terms
+print("~~~~~~~~~~ Marginal Effects of Predicted Wealth Terms ~~~~~~~~~~~~~~")
+print(marginal_effect_predicted_wealth_inherit)
+print(marginal_effect_predicted_wealth_lumpsum)
+
+```
+
+
+```{r}
+# Simulate a fake stimulus check in 2021 at amount $2,000 for each households and predict the results from the above two models
+
+# Step 1: Generate lumpsum and simu_lumpsum
+Pdd$lumpsum <- ifelse(Pdd$year == 2021, 2000, 0)
+Pdd$simu_lumpsum <- Pdd$inherit + Pdd$lumpsum
+
+# Step 2: Create Pdd_inherit_simu and Pdd_transfer_simu datasets
+Pdd_inherit_simu <- Pdd
+Pdd_transfer_simu <- Pdd
+
+# Set inheritance to simu_lumpsum in Pdd_inherit_simu
+Pdd_inherit_simu$inherit <- Pdd_inherit_simu$simu_lumpsum
+
+# Set lumpsum_endowment to simu_lumpsum in Pdd_transfer_simu
+Pdd_transfer_simu$lumpsum_endowment <- Pdd_transfer_simu$simu_lumpsum
+
+# Step 3: Predict wealth using first-stage models
+Pdd_inherit_simu$predicted_wealth_inheritance <- predict(first_stage_inheritance, newdata = Pdd_inherit_simu)
+Pdd_transfer_simu$predicted_wealth_lumpsum <- predict(first_stage_lumpsum, newdata = Pdd_transfer_simu)
+
+# Step 4: Predict outcomes using second-stage models
+Pdd_inherit_simu$Y_inherit_simu_lumpsum <- predict(probit_IV_inherit, newdata = Pdd_inherit_simu, type = "response")
+Pdd_transfer_simu$Y_transfer_simu_lumpsum <- predict(probit_IV_lumpsum, newdata = Pdd_transfer_simu, type = "response")
+
+# Step 5: Merge predictions back to the original dataset by year and pid
+Pdd <- merge(Pdd, Pdd_inherit_simu[, c("pid", "year", "Y_inherit_simu_lumpsum")], by = c("pid", "year"), all.x = TRUE)
+Pdd <- merge(Pdd, Pdd_transfer_simu[, c("pid", "year", "Y_transfer_simu_lumpsum")], by = c("pid", "year"), all.x = TRUE)
+
+# Display the first few rows of the merged dataset
+head(Pdd)
+
+```
+
+# Table 7: Skip - too slow: Quantile Regression with IV for Wealth (Inheritance and Lump-sum Transfer)
+```{r}
+# Step 1: First stage regression to instrument for 'wealth_fm' using 'inherit' as an instrument
+first_stage_inherit <- lm(wealth_fm ~ inherit + age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw, data = Pdd)
+
+# Predict 'wealth_fm' from the first stage
+Pdd$predicted_wealth_inheritance <- predict(first_stage_inherit, newdata = Pdd)
+
+# Step 2: Quantile regression (using predicted wealth) for a specific quantile (e.g., tau = 0.5 for median)
+quantile_iv_inherit_2 <- rq(Y ~ age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw + predicted_wealth_inheritance + pid_factor + year_factor, tau = 0.8, data = Pdd)
+
+quantile_iv_inherit_5 <- rq(Y ~ age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw + predicted_wealth_inheritance + pid_factor + year_factor, tau = 0.5, data = Pdd)
+
+```
+
+```{r}
+# Step 2: Display the summary of the quantile regression results
+summary_0.8 <- summary(quantile_iv_inherit_2)
+summary_0.5 <- summary(quantile_iv_inherit_5)
+
+# Display the results for tau = 0.8
+print("Quantile Regression Results for tau = 0.8:")
+print(summary_0.8)
+
+# Display the results for tau = 0.5
+print("Quantile Regression Results for tau = 0.5:")
+print(summary_0.5)
+```
+
+
+```{r}
+# Function to extract and scale coefficients and standard errors
+extract_scale_term <- function(model, term) {
+  coef_value <- coef(model)[term] * 100
+  se_value <- summary(model)$coefficients[term, "Std. Error"] * 100
+  return(list(coef = coef_value, se = se_value))
+}
+
+```
+
+```{r}
+# Only show the second stages' marginal effects, predicted_wealth_inheritance and predicted_wealth_lumpsum on the dependent variable Y
+# Extract coefficients
+coefficients_IV_inherit <- coef(probit_IV_inherit)
+coefficients_IV_lumpsum <- coef(probit_IV_lumpsum)
+
+# Calculate the mean values of the covariates (excluding the fixed effect dummies)
+mean_values_inherit <- colMeans(model.matrix(probit_IV_inherit)[, names(coefficients_IV_inherit)])
+mean_values_lumpsum <- colMeans(model.matrix(probit_IV_lumpsum)[, names(coefficients_IV_lumpsum)])
+
+# Calculate the linear predictor at the mean of covariates
+linear_predictor_inherit <- sum(mean_values_inherit * coefficients_IV_inherit)
+linear_predictor_lumpsum <- sum(mean_values_lumpsum * coefficients_IV_lumpsum)
+
+# Extract the coefficients for the predicted wealth terms
+predicted_wealth_inherit_coef <- coefficients_IV_inherit["predicted_wealth_inheritance"]
+predicted_wealth_lumpsum_coef <- coefficients_IV_lumpsum["predicted_wealth_lumpsum"]
+
+# Calculate the density of the normal distribution at the predicted probability
+density_at_pred_prob_inherit <- dnorm(linear_predictor_inherit)
+density_at_pred_prob_lumpsum <- dnorm(linear_predictor_lumpsum)
+
+# Calculate the marginal effect of the predicted wealth terms
+marginal_effect_predicted_wealth_inherit <- density_at_pred_prob_inherit * predicted_wealth_inherit_coef
+marginal_effect_predicted_wealth_lumpsum <- density_at_pred_prob_lumpsum * predicted_wealth_lumpsum_coef
+
+# Display the marginal effects of the predicted wealth terms
+print("~~~~~~~~~~ Marginal Effects of Predicted Wealth Terms ~~~~~~~~~~~~~~")
+print(marginal_effect_predicted_wealth_inherit)
+print(marginal_effect_predicted_wealth_lumpsum)
+
+```
+
+# Table 7: Probit-IV on quintile groups ####
+
+```{r}
+# List of datasets for each quantile group
+quantile_datasets <- list(Pdd_Q1, Pdd_Q2, Pdd_Q3, Pdd_Q4, Pdd_Q5)
+
+# Create empty lists to store models and results
+first_stage_inherit_list <- list()
+first_stage_lumpsum_list <- list()
+probit_IV_inherit_list <- list()
+probit_IV_lumpsum_list <- list()
+
+# Loop over each quantile group dataset to perform regressions
+for (i in 1:length(quantile_datasets)) {
+  data <- quantile_datasets[[i]]
+  
+  # First stage regressions for two instruments
+  first_stage_inherit <- ivreg(wealth_fm ~ inherit + age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw, data = data)
+  first_stage_lumpsum <- ivreg(wealth_fm ~ lumpsum_endowment + age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw, data = data)
+  
+  # Store first stage models
+  first_stage_inherit_list[[i]] <- first_stage_inherit
+  first_stage_lumpsum_list[[i]] <- first_stage_lumpsum
+  
+  # Predict the fitted values of wealth from the first stage
+  data$predicted_wealth_inheritance <- predict(first_stage_inherit, newdata = data)
+  data$predicted_wealth_lumpsum <- predict(first_stage_lumpsum, newdata = data)
+  
+  # Second stage probit regression with predicted wealth from the first stage as an instrument
+  probit_IV_inherit <- glm(Y ~ age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw + predicted_wealth_inheritance + pid_factor + year_factor,
+                           data = data, 
+                           family = binomial(link = "probit"))
+  
+  probit_IV_lumpsum <- glm(Y ~ age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw + predicted_wealth_lumpsum + pid_factor + year_factor,
+                           data = data, 
+                           family = binomial(link = "probit"))
+  
+  # Store second stage models
+  probit_IV_inherit_list[[i]] <- probit_IV_inherit
+  probit_IV_lumpsum_list[[i]] <- probit_IV_lumpsum
+}
+
+```
+
+```{r}
+# Extract coefficients and standard errors, and scale them by 100
+coefficients_IV_inherit <- lapply(probit_IV_inherit_list, function(model) coef(model) * 100)
+coefficients_IV_lumpsum <- lapply(probit_IV_lumpsum_list, function(model) coef(model) * 100)
+
+se_IV_inherit <- lapply(probit_IV_inherit_list, function(model) summary(model)$coefficients[, "Std. Error"] * 100)
+se_IV_lumpsum <- lapply(probit_IV_lumpsum_list, function(model) summary(model)$coefficients[, "Std. Error"] * 100)
+
+# Use stargazer to display the results
+stargazer(probit_IV_inherit_list, probit_IV_lumpsum_list,
+          type = "text",
+          coef = c(coefficients_IV_inherit, coefficients_IV_lumpsum),
+          se = c(se_IV_inherit, se_IV_lumpsum),
+          single.row = TRUE,
+          digits = 2,
+          omit = "pid_factor",
+          title = "IV Regression with Instruments for Wealth (Inheritance and Lump-sum Transfer) by Wealth Quantiles")
+```
+
+```{r}
+
+# List of datasets for each quantile group
+quantile_datasets <- list(Pdd_Q1, Pdd_Q2, Pdd_Q3, Pdd_Q4, Pdd_Q5)
+
+# Create empty lists to store models and marginal effects
+probit_IV_inherit_list <- list()
+probit_IV_lumpsum_list <- list()
+marginal_effect_predicted_wealth_inherit_list <- list()
+marginal_effect_predicted_wealth_lumpsum_list <- list()
+
+# Function to compute marginal effects for a probit model
+compute_marginal_effect_probit <- function(model, term) {
+  # Extract coefficients
+  coefficients <- coef(model)
+  
+  # Calculate the mean values of the covariates (excluding the fixed effect dummies)
+  mean_values <- colMeans(model.matrix(model)[, names(coefficients)])
+  
+  # Calculate the linear predictor at the mean of covariates
+  linear_predictor <- sum(mean_values * coefficients)
+  
+  # Extract the coefficient for the term of interest
+  term_coef <- coefficients[term]
+  
+  # Calculate the density of the normal distribution at the predicted probability
+  density_at_pred_prob <- dnorm(linear_predictor)
+  
+  # Calculate the marginal effect of the term
+  marginal_effect <- density_at_pred_prob * term_coef
+  return(marginal_effect)
+}
+
+# Loop over each quantile group dataset to perform regressions and compute marginal effects
+for (i in 1:length(quantile_datasets)) {
+  data <- quantile_datasets[[i]]
+  
+  # Add predicted wealth columns for each dataset
+  data$predicted_wealth_inheritance <- predict(ivreg(wealth_fm ~ inherit + age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw, data = data), newdata = data)
+  data$predicted_wealth_lumpsum <- predict(ivreg(wealth_fm ~ lumpsum_endowment + age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw, data = data), newdata = data)
+  
+  # Second stage probit regression with predicted wealth from the first stage as an instrument
+  probit_IV_inherit <- glm(Y ~ age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw + predicted_wealth_inheritance + pid_factor + year_factor,
+                           data = data, 
+                           family = binomial(link = "probit"))
+  
+  probit_IV_lumpsum <- glm(Y ~ age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw + predicted_wealth_lumpsum + pid_factor + year_factor,
+                           data = data, 
+                           family = binomial(link = "probit"))
+  
+  # Store second stage models
+  probit_IV_inherit_list[[i]] <- probit_IV_inherit
+  probit_IV_lumpsum_list[[i]] <- probit_IV_lumpsum
+  
+  # Compute marginal effects for the predicted wealth terms
+  marginal_effect_predicted_wealth_inherit <- compute_marginal_effect_probit(probit_IV_inherit, "predicted_wealth_inheritance")
+  marginal_effect_predicted_wealth_lumpsum <- compute_marginal_effect_probit(probit_IV_lumpsum, "predicted_wealth_lumpsum")
+  
+  # Store marginal effects
+  marginal_effect_predicted_wealth_inherit_list[[i]] <- marginal_effect_predicted_wealth_inherit
+  marginal_effect_predicted_wealth_lumpsum_list[[i]] <- marginal_effect_predicted_wealth_lumpsum
+}
+
+# Display the marginal effects for each quantile group
+print("~~~~~~~~~~ Marginal Effects of Predicted Wealth Terms by Quintile Group ~~~~~~~~~~~~~~")
+for (i in 1:length(quantile_datasets)) {
+  print(paste("Quantile Group Q", i, sep = ""))
+  print(paste("Predicted Wealth (Inheritance IV):", format(marginal_effect_predicted_wealth_inherit_list[[i]], scientific = TRUE)))
+  print(paste("Predicted Wealth (Lumpsum IV):", format(marginal_effect_predicted_wealth_lumpsum_list[[i]], scientific = TRUE)))
+}
+
+```
+
+
+#### Construct the Bartik-like IV ####
+
+```{r}
+library(dplyr)
+```
+
+```{r}
+# this is data for bartik
+#### Construct the Bartik-like IV - get to the definition of Y directly ####
+#### Run file bartik IV shift - stock and house.Rmd first to acquire bartik_IV ###
+load(file = "/Users/ivyyang/Dropbox/cloud/Research/Research 2023/Chapter 1/Data/Pdd_bartik ready.rds")
+```
+
+```{r}
+# rescale wealth
+Pdd$wealth_fm<-Pdd$wealth/100000
+```
+
+
+```{r}
+# select the dependent variable 
+Pdd$Y <- Pdd$D_OwnBus
+```
+
+```{r}
+Pdd_summary <- Pdd %>%
+  group_by(year) %>%
+  summarize(
+    mean_state_house_ind = mean(state_house_ind, na.rm = TRUE),
+    median_state_house_ind = median(state_house_ind, na.rm = TRUE),
+    max_state_house_ind = max(state_house_ind, na.rm = TRUE),
+    min_state_house_ind = min(state_house_ind, na.rm = TRUE),
+    count = n()
+  )
+print(Pdd_summary)
+```
+
+```{r}
+# generate the Delta_house variable as the growth rate of the local house price index, this is by year
+Pdd <- Pdd[, !duplicated(colnames(Pdd))]
+
+Pdd <- Pdd %>%
+  arrange(pid, year) %>%  # Ensure the data is sorted by pid and year
+  group_by(pid) %>%
+  mutate(Delta_house = state_house_ind - dplyr::lag(state_house_ind)) %>%
+  ungroup()
+
+summary(Pdd$Delta_house)
+
+```
+
+# Table 8: IV Regression with Instruments for Wealth (Local house index and Bartik-like instrument)
+```{r}
+# First stage regressions for two instruments
+Pdd$bartik_IV[is.infinite(Pdd$bartik_IV)] <- NA
+
+first_stage_house <- ivreg(wealth_fm ~ Delta_house + age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw, data = na.omit(Pdd))
+
+first_stage_bartik <- ivreg(wealth_fm ~ bartik_IV +  age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw, , data = na.omit(Pdd))
+
+## Predict the fitted values of wealth from the first stage
+Pdd$predicted_wealth_house <- predict(first_stage_house, newdata = Pdd)
+Pdd$predicted_wealth_bartik <- predict(first_stage_bartik, newdata = Pdd)
+
+```
+
+```{r}
+#Summarize the first stage results
+summary(first_stage_house)
+summary(first_stage_bartik)
+```
+
+
+```{r}
+
+# Second stage regression with predicted wealth from the first stage as an instrument
+
+probit_IV_house <- glm(Y ~ age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw +  predicted_wealth_house + pid_factor + year_factor, 
+                       data = Pdd, 
+                       family = binomial(link = "probit"))
+
+probit_IV_bartik <- glm(Y ~ age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw +  predicted_wealth_bartik + pid_factor + year_factor, 
+                       data = Pdd, 
+                       family = binomial(link = "probit"))
+```
+
+```{r}
+# Extract coefficients and standard errors, and scale them by 100
+
+coefficients_IV_house <- coef(probit_IV_house) * 100
+coefficients_IV_bartik <- coef(probit_IV_bartik) * 100
+
+se_IV_house <- summary(probit_IV_house)$coefficients[, "Std. Error"] * 100
+se_IV_bartik <- summary(probit_IV_bartik)$coefficients[, "Std. Error"] * 100
+
+# Display the results using stargazer
+stargazer(probit_IV_house, probit_IV_bartik,
+          type = "text",
+          coef = list(coefficients_IV_house, coefficients_IV_bartik),
+          se = list(se_IV_house, se_IV_bartik),
+          single.row = TRUE,
+          digits = 2,
+          omit = "pid_factor",
+          title = "IV Regression with Instruments for Wealth (Local house index and shift-share IV)")
+```
+```{r}
+# Manual probit marginal effects
+
+# Function to compute marginal effects for a probit model
+compute_marginal_effect_probit <- function(model, term) {
+  # Extract coefficients
+  coefficients <- coef(model)
+  
+  # Calculate the mean values of the covariates (excluding the fixed effect dummies)
+  mean_values <- colMeans(model.matrix(model)[, names(coefficients)])
+  
+  # Calculate the linear predictor at the mean of covariates
+  linear_predictor <- sum(mean_values * coefficients)
+  pred_prob <- pnorm(linear_predictor)
+  
+  # Extract the coefficient for the term of interest
+  term_coef <- coefficients[term]
+  
+  # Calculate the density of the normal distribution at the predicted probability
+  density_at_pred_prob <- dnorm(linear_predictor)
+  
+  # Calculate the marginal effect of the term
+  marginal_effect <- density_at_pred_prob * term_coef
+  return(marginal_effect)
+}
+```
+
+```{r}
+# Function to compute the marginal effect of wealth_fm via instrumental variables
+compute_marginal_effect_IV <- function(first_stage_model, second_stage_model, instrument) {
+  # First stage marginal effect
+  first_stage_coef <- coef(first_stage_model)["Delta_house"]  # or ["bartik_IV"]
+  
+  # Second stage marginal effect
+  second_stage_marginal_effect <- compute_marginal_effect_probit(second_stage_model, paste0("predicted_", instrument))
+  
+  # Overall marginal effect
+  overall_marginal_effect <- first_stage_coef * second_stage_marginal_effect
+  return(overall_marginal_effect)
+}
+
+# Compute marginal effects for the IV probit models
+marginal_effect_IV_house <- compute_marginal_effect_IV(first_stage_house, probit_IV_house, "wealth_house")
+marginal_effect_IV_bartik <- compute_marginal_effect_IV(first_stage_bartik, probit_IV_bartik, "wealth_shiftshare")
+
+# Display the marginal effects in scientific notation
+print("Marginal Effects (in scientific notation):")
+print(paste("IV_houseind:", format(marginal_effect_IV_house, scientific = TRUE)))
+print(paste("IV_shiftshare:", format(marginal_effect_IV_bartik, scientific = TRUE)))
+
+```
+```{r}
+# Only show the second stages' marginal effects, predicted_wealth_inheritance and predicted_wealth_lumpsum on the dependent variable Y
+# Extract coefficients
+coefficients_IV_house <- coef(probit_IV_house)
+coefficients_IV_bartik <- coef(probit_IV_bartik)
+
+# Calculate the mean values of the covariates (excluding the fixed effect dummies)
+mean_values_house <- colMeans(model.matrix(probit_IV_house)[, names(coefficients_IV_house)])
+mean_values_bartik <- colMeans(model.matrix(probit_IV_bartik)[, names(coefficients_IV_bartik)])
+
+# Calculate the linear predictor at the mean of covariates
+linear_predictor_house <- sum(mean_values_house * coefficients_IV_house)
+linear_predictor_bartik <- sum(mean_values_bartik * coefficients_IV_bartik)
+
+# Extract the coefficients for the predicted wealth terms
+predicted_wealth_house_coef <- coefficients_IV_house["predicted_wealth_house"]
+predicted_wealth_bartik_coef <- coefficients_IV_bartik["predicted_wealth_bartik"]
+
+# Calculate the density of the normal distribution at the predicted probability
+density_at_pred_prob_house <- dnorm(linear_predictor_house)
+density_at_pred_prob_bartik <- dnorm(linear_predictor_bartik)
+
+# Calculate the marginal effect of the predicted wealth terms
+marginal_effect_predicted_wealth_house <- density_at_pred_prob_house * predicted_wealth_house_coef
+marginal_effect_predicted_wealth_bartik <- density_at_pred_prob_bartik * predicted_wealth_bartik_coef
+
+# Display the marginal effects of the predicted wealth terms
+print("~~~~~~~~~~ Marginal Effects of Predicted Wealth Terms ~~~~~~~~~~~~~~")
+print(marginal_effect_predicted_wealth_house)
+print(marginal_effect_predicted_wealth_bartik)
+
+```
+
+# Table 9: Probit-IV on quintile groups ####
+```{r}
+Pdd <- Pdd[, !duplicated(colnames(Pdd))]
+
+# Step 1: Subset the data for the year 1999 and calculate quantiles
+initial_year_data <- Pdd %>% filter(year == 1999)
+
+# Calculate the wealth quantiles
+initial_quantiles <- quantile(initial_year_data$wealth, probs = seq(0, 1, by = 0.2), na.rm = TRUE)
+
+# Assign quantile labels to each household based on their 1999 wealth
+initial_year_data <- initial_year_data %>%
+  mutate(initial_wealth_quantile = cut(wealth,
+                                       breaks = initial_quantiles,
+                                       labels = c("Q1", "Q2", "Q3", "Q4", "Q5"),
+                                       include.lowest = TRUE))
+
+# Step 2: Merge the quantile labels back into the main dataset
+# Select only the `pid` and `initial_wealth_quantile` columns to merge
+Pdd <- Pdd %>%
+  left_join(initial_year_data %>% dplyr::select(pid, initial_wealth_quantile), by = "pid")
+
+# Step 3: Verify if the column has been added
+glimpse(Pdd)
+
+```
+
+
+```{r}
+
+# Subset data for each quantile group
+Pdd_Q1 <- subset(Pdd, initial_wealth_quantile == "Q1")
+Pdd_Q2 <- subset(Pdd, initial_wealth_quantile == "Q2")
+Pdd_Q3 <- subset(Pdd, initial_wealth_quantile == "Q3")
+Pdd_Q4 <- subset(Pdd, initial_wealth_quantile == "Q4")
+Pdd_Q5 <- subset(Pdd, initial_wealth_quantile == "Q5")
+
+```
+
+```{r}
+# List of datasets for each quantile group
+quantile_datasets <- list(Pdd_Q1, Pdd_Q2, Pdd_Q3, Pdd_Q4, Pdd_Q5)
+
+# Create empty lists to store models and results
+first_stage_house_list <- list()
+first_stage_bartik_list <- list()
+probit_IV_house_list <- list()
+probit_IV_bartik_list <- list()
+
+# Loop over each quantile group dataset to perform regressions
+for (i in 1:length(quantile_datasets)) {
+  data <- quantile_datasets[[i]]
+  
+  # First stage regressions for two instruments
+  first_stage_house <- ivreg(wealth_fm ~ Delta_house + age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw, data = data)
+  first_stage_bartik <- ivreg(wealth_fm ~ bartik_IV + age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw, data = data)
+  
+  # Store first stage models
+  first_stage_house_list[[i]] <- first_stage_house
+  first_stage_bartik_list[[i]] <- first_stage_bartik
+  
+  # Predict the fitted values of wealth from the first stage
+  data$predicted_wealth_house <- predict(first_stage_house, newdata = data)
+  data$predicted_wealth_bartik <- predict(first_stage_bartik, newdata = data)
+  
+  # Second stage probit regression with predicted wealth from the first stage as an instrument
+  probit_IV_house <- glm(Y ~ age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw + predicted_wealth_house + pid_factor + year_factor,
+                           data = data, 
+                           family = binomial(link = "probit"))
+  
+  probit_IV_bartik <- glm(Y ~ age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw + predicted_wealth_bartik + pid_factor + year_factor,
+                           data = data, 
+                           family = binomial(link = "probit"))
+  
+  # Store second stage models
+  probit_IV_house_list[[i]] <- probit_IV_house
+  probit_IV_bartik_list[[i]] <- probit_IV_bartik
+}
+
+```
+
+```{r}
+# Extract coefficients and standard errors, and scale them by 100
+coefficients_IV_house <- lapply(probit_IV_house_list, function(model) coef(model) * 100)
+coefficients_IV_bartik <- lapply(probit_IV_bartik_list, function(model) coef(model) * 100)
+
+se_IV_house <- lapply(probit_IV_house_list, function(model) summary(model)$coefficients[, "Std. Error"] * 100)
+se_IV_bartik <- lapply(probit_IV_bartik_list, function(model) summary(model)$coefficients[, "Std. Error"] * 100)
+
+# Use stargazer to display the results
+stargazer(probit_IV_house_list, probit_IV_bartik_list,
+          type = "text",
+          coef = c(coefficients_IV_house, coefficients_IV_bartik),
+          se = c(se_IV_house, se_IV_bartik),
+          single.row = TRUE,
+          digits = 2,
+          omit = "pid_factor",
+          title = "IV Regression with Instruments for Wealth (Local house index and shift-share IV) by Wealth Quantiles")
+```
+```{r}
+# List of datasets for each quantile group
+quantile_datasets <- list(Pdd_Q1, Pdd_Q2, Pdd_Q3, Pdd_Q4, Pdd_Q5)
+
+# Create empty lists to store models and results
+first_stage_house_list <- list()
+first_stage_bartik_list <- list()
+probit_IV_house_list <- list()
+probit_IV_bartik_list <- list()
+marginal_effects_house_list <- list()
+marginal_effects_bartik_list <- list()
+
+# Loop over each quantile group dataset to perform regressions and calculate marginal effects
+for (i in 1:length(quantile_datasets)) {
+  data <- quantile_datasets[[i]]
+  
+  # First stage regressions for two instruments
+  first_stage_house <- ivreg(wealth_fm ~ Delta_house + age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw, data = data)
+  first_stage_bartik <- ivreg(wealth_fm ~ bartik_IV + age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw, data = data)
+  
+  # Store first stage models
+  first_stage_house_list[[i]] <- first_stage_house
+  first_stage_bartik_list[[i]] <- first_stage_bartik
+  
+  # Predict the fitted values of wealth from the first stage
+  data$predicted_wealth_house <- predict(first_stage_house, newdata = data)
+  data$predicted_wealth_bartik <- predict(first_stage_bartik, newdata = data)
+  
+  # Second stage probit regression with predicted wealth from the first stage
+  probit_IV_house <- glm(Y ~ age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw + predicted_wealth_house + pid_factor + year_factor,
+                         data = data, 
+                         family = binomial(link = "probit"))
+  
+  probit_IV_bartik <- glm(Y ~ age + D_college + D_married + D_black + D_gender + D_bus_fam_experience + work_hour_typical_pw + predicted_wealth_bartik + pid_factor + year_factor,
+                          data = data, 
+                          family = binomial(link = "probit"))
+  
+  # Store second stage models
+  probit_IV_house_list[[i]] <- probit_IV_house
+  probit_IV_bartik_list[[i]] <- probit_IV_bartik
+  
+  # Extract coefficients for the predicted wealth terms
+  coefficients_IV_house <- coef(probit_IV_house)
+  coefficients_IV_bartik <- coef(probit_IV_bartik)
+  predicted_wealth_house_coef <- coefficients_IV_house["predicted_wealth_house"]
+  predicted_wealth_bartik_coef <- coefficients_IV_bartik["predicted_wealth_bartik"]
+  
+  # Calculate the mean values of the covariates (excluding the fixed effect dummies)
+  mean_values_house <- colMeans(model.matrix(probit_IV_house)[, names(coefficients_IV_house)])
+  mean_values_bartik <- colMeans(model.matrix(probit_IV_bartik)[, names(coefficients_IV_bartik)])
+  
+  # Calculate the linear predictor at the mean of covariates
+  linear_predictor_house <- sum(mean_values_house * coefficients_IV_house)
+  linear_predictor_bartik <- sum(mean_values_bartik * coefficients_IV_bartik)
+  
+  # Calculate the density of the normal distribution at the predicted probability
+  density_at_pred_prob_house <- dnorm(linear_predictor_house)
+  density_at_pred_prob_bartik <- dnorm(linear_predictor_bartik)
+  
+  # Calculate the marginal effect of the predicted wealth terms
+  marginal_effect_predicted_wealth_house <- density_at_pred_prob_house * predicted_wealth_house_coef
+  marginal_effect_predicted_wealth_bartik <- density_at_pred_prob_bartik * predicted_wealth_bartik_coef
+  
+  # Store the marginal effects in lists
+  marginal_effects_house_list[[i]] <- marginal_effect_predicted_wealth_house
+  marginal_effects_bartik_list[[i]] <- marginal_effect_predicted_wealth_bartik
+}
+
+# Display the marginal effects for each quantile group
+for (i in 1:length(quantile_datasets)) {
+  cat("~~~~~~~~~~ Marginal Effects for Quantile Group Q", i, "~~~~~~~~~~\n", sep="")
+  cat("Marginal Effect of Predicted Wealth (House): ", marginal_effects_house_list[[i]], "\n")
+  cat("Marginal Effect of Predicted Wealth (Bartik): ", marginal_effects_bartik_list[[i]], "\n\n")
+}
+
+```
+
+
